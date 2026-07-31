@@ -7,16 +7,11 @@ the time as taken. This is what makes it safe to use even though your Outlook
 calendar isn't allowed to be exported: no meeting content ever leaves either
 system.
 
-Both calendars are scripted through Calendar.app (via JXA/`osascript`) — there
-is no Google API, no OAuth credentials, and no cloud project involved, so
-there's nothing to cost you anything.
+## 1. Add your Google account and Outlook account to Calendar.app, with syncing enabled
 
-## 1. Add your Google account to Calendar.app
+They should appear as calendars in Calendar.app's sidebar
 
-1. Open System Settings > Internet Accounts (or Calendar > Settings >
-   Accounts) and add your Google account, with Calendar syncing enabled.
-2. It will now show up as a calendar in Calendar.app's sidebar, alongside
-   your Outlook calendar (Calendar.app > View > Show Calendar List).
+![calendar sidebar](https://raw.githubusercontent.com/mbryk/calendarsync/refs/heads/main/images/calendar-sidebar.png)
 
 ## 2. Configure the script
 

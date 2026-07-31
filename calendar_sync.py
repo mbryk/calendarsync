@@ -53,7 +53,7 @@ OUTLOOK_CALENDAR_NAME = "NJIA Calendar"
 GOOGLE_CALENDAR_NAME = "MAD Mark"
 
 # How many days ahead (from "now") to keep synced.
-SYNC_WINDOW_DAYS = 4
+SYNC_WINDOW_DAYS = 7
 
 # Title prefix used to mark placeholder events created by this script, on
 # BOTH calendars. Must be distinctive so it never collides with a real
