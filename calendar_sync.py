@@ -19,13 +19,12 @@ How it works
 ------------
 On every run, for each side:
   1. Read the real (non-placeholder) events in the sync window.
-  2. Delete every placeholder event this script previously created in that
-     window (identified by a title prefix).
-  3. Recreate one fresh placeholder per real event on the OTHER calendar.
-
-Wiping and recreating (rather than diffing) means moved/cancelled meetings
-are handled automatically, at the cost of placeholder event IDs changing
-each run — which is fine since nothing else references them.
+  2. List the placeholder events this script previously created on the
+     OTHER calendar (identified by a title prefix).
+  3. Diff by (start, end) time: delete placeholders with no matching real
+     event anymore (the meeting moved or was cancelled), and create
+     placeholders for real events that don't already have one. Untouched
+     placeholders are left alone.
 
 Setup
 -----
@@ -90,8 +89,18 @@ def get_events(calendar_name):
     return data
 
 
-def delete_placeholders(calendar_name):
-    data = run_jxa("delete_placeholders.js", [calendar_name, PLACEHOLDER_PREFIX])
+def list_placeholders(calendar_name):
+    data = run_jxa("list_placeholders.js", [calendar_name, PLACEHOLDER_PREFIX])
+    if isinstance(data, dict) and "error" in data:
+        raise RuntimeError(data["error"])
+    return data
+
+
+def delete_events(calendar_name, events):
+    data = run_jxa(
+        "delete_events.js",
+        [calendar_name, PLACEHOLDER_PREFIX, json.dumps(events)],
+    )
     if isinstance(data, dict) and "error" in data:
         raise RuntimeError(data["error"])
     return data.get("deleted", 0)
@@ -106,6 +115,23 @@ def create_placeholder(calendar_name, start_iso, end_iso):
         raise RuntimeError(data["error"])
 
 
+def sync_direction(source_events, dest_calendar_name):
+    """Make dest_calendar_name's placeholders match source_events, touching
+    only what changed. Returns (created, deleted) counts."""
+    wanted = {(ev["startDate"], ev["endDate"]) for ev in source_events}
+    existing_placeholders = list_placeholders(dest_calendar_name)
+    existing = {(p["startDate"], p["endDate"]) for p in existing_placeholders}
+
+    stale = [{"startDate": s, "endDate": e} for (s, e) in existing - wanted]
+    missing = wanted - existing
+
+    deleted = delete_events(dest_calendar_name, stale) if stale else 0
+    for start_iso, end_iso in missing:
+        create_placeholder(dest_calendar_name, start_iso, end_iso)
+
+    return len(missing), deleted
+
+
 # ------------------------------------ main -----------------------------------
 
 def main():
@@ -116,20 +142,13 @@ def main():
     print(f"  {OUTLOOK_CALENDAR_NAME}: {len(outlook_events)} real event(s) in window")
     print(f"  {GOOGLE_CALENDAR_NAME}:  {len(google_events)} real event(s) in window")
 
-    print("Clearing old placeholders...")
-    n1 = delete_placeholders(OUTLOOK_CALENDAR_NAME)
-    n2 = delete_placeholders(GOOGLE_CALENDAR_NAME)
-    print(f"  Removed {n1} {OUTLOOK_CALENDAR_NAME} placeholder(s), {n2} {GOOGLE_CALENDAR_NAME} placeholder(s)")
-
-    print("Creating fresh placeholders...")
-    for ev in outlook_events:
-        create_placeholder(GOOGLE_CALENDAR_NAME, ev["startDate"], ev["endDate"])
-    for ev in google_events:
-        create_placeholder(OUTLOOK_CALENDAR_NAME, ev["startDate"], ev["endDate"])
+    print("Syncing placeholders...")
+    created1, deleted1 = sync_direction(outlook_events, GOOGLE_CALENDAR_NAME)
+    created2, deleted2 = sync_direction(google_events, OUTLOOK_CALENDAR_NAME)
 
     print(
-        f"Done. Created {len(outlook_events)} {GOOGLE_CALENDAR_NAME} placeholder(s) and "
-        f"{len(google_events)} {OUTLOOK_CALENDAR_NAME} placeholder(s)."
+        f"Done. {GOOGLE_CALENDAR_NAME}: +{created1}/-{deleted1} placeholder(s). "
+        f"{OUTLOOK_CALENDAR_NAME}: +{created2}/-{deleted2} placeholder(s)."
     )
 
 

@@ -36,7 +36,9 @@ Privacy & Security > Automation if you miss the dialog).
 
 Check both calendars — you should see "🔒 Busy" placeholders appear for each
 real event on the other side. Run it a second time and confirm it doesn't
-duplicate them (it wipes and recreates cleanly).
+duplicate them — it diffs by time against existing placeholders, so
+unchanged events are left untouched and only moved/cancelled/new ones cause
+a create or delete.
 
 ## 4. Automate it with launchd
 
@@ -72,7 +74,8 @@ launchctl unload ~/Library/LaunchAgents/com.you.calendarsync.plist
   a single "OOO" day blocking your whole calendar), you can filter those out
   in `read_events.js`.
 - **Deleting the script's placeholders manually is safe** — the next run
-  just recreates whatever's still needed.
+  just recreates whatever's still needed (it diffs against real events, so
+  nothing gets silently skipped).
 - **Don't rename `PLACEHOLDER_PREFIX`** after the first run without manually
   cleaning up old placeholders created under the previous prefix, since the
   script uses it to identify (and safely delete) only its own events.
