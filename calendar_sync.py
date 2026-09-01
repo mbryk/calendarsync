@@ -46,10 +46,18 @@ from pathlib import Path
 
 # ============================= CONFIG =======================================
 
-# Exact names of the two calendars as they appear in Calendar.app's sidebar
-# (Calendar.app > View > Show Calendar List to check).
-OUTLOOK_CALENDAR_NAME = "NJIA Calendar"
-GOOGLE_CALENDAR_NAME = "MAD Mark"
+# Stable Calendar.app internal ids for the two calendars, NOT their display
+# names — Exchange periodically overwrites the local display name back to
+# whatever the server-side folder is named (e.g. "Calendar"), so matching by
+# name is unreliable. Run `osascript list_calendar_ids.applescript` to print
+# each calendar's name, id, and a couple of upcoming event titles (to tell
+# apart same-named calendars) and paste the right id below.
+OUTLOOK_CALENDAR_ID = "3F5D9A23-9D3A-42F2-95B3-7AC25596D995"
+GOOGLE_CALENDAR_ID = "3B690F1C-C2D6-4160-9034-4B8A3283C60B"
+
+# Human-readable labels for these calendars, used only in log output.
+OUTLOOK_CALENDAR_LABEL = "NJIA Calendar"
+GOOGLE_CALENDAR_LABEL = "MAD Mark"
 
 # How many days ahead (from "now") to keep synced.
 SYNC_WINDOW_DAYS = 7
@@ -79,55 +87,55 @@ def run_jxa(script_name, args):
         raise RuntimeError(f"{script_name} returned non-JSON output: {result.stdout!r}")
 
 
-def get_events(calendar_name):
+def get_events(calendar_id):
     data = run_jxa(
         "read_events.js",
-        [calendar_name, PLACEHOLDER_PREFIX, str(SYNC_WINDOW_DAYS)],
+        [calendar_id, PLACEHOLDER_PREFIX, str(SYNC_WINDOW_DAYS)],
     )
     if isinstance(data, dict) and "error" in data:
         raise RuntimeError(data["error"])
     return data
 
 
-def list_placeholders(calendar_name):
-    data = run_jxa("list_placeholders.js", [calendar_name, PLACEHOLDER_PREFIX])
+def list_placeholders(calendar_id):
+    data = run_jxa("list_placeholders.js", [calendar_id, PLACEHOLDER_PREFIX])
     if isinstance(data, dict) and "error" in data:
         raise RuntimeError(data["error"])
     return data
 
 
-def delete_events(calendar_name, events):
+def delete_events(calendar_id, events):
     data = run_jxa(
         "delete_events.js",
-        [calendar_name, PLACEHOLDER_PREFIX, json.dumps(events)],
+        [calendar_id, PLACEHOLDER_PREFIX, json.dumps(events)],
     )
     if isinstance(data, dict) and "error" in data:
         raise RuntimeError(data["error"])
     return data.get("deleted", 0)
 
 
-def create_placeholder(calendar_name, start_iso, end_iso):
+def create_placeholder(calendar_id, start_iso, end_iso):
     data = run_jxa(
         "create_event.js",
-        [calendar_name, PLACEHOLDER_PREFIX, start_iso, end_iso],
+        [calendar_id, PLACEHOLDER_PREFIX, start_iso, end_iso],
     )
     if isinstance(data, dict) and "error" in data:
         raise RuntimeError(data["error"])
 
 
-def sync_direction(source_events, dest_calendar_name):
-    """Make dest_calendar_name's placeholders match source_events, touching
+def sync_direction(source_events, dest_calendar_id):
+    """Make dest_calendar_id's placeholders match source_events, touching
     only what changed. Returns (created, deleted) counts."""
     wanted = {(ev["startDate"], ev["endDate"]) for ev in source_events}
-    existing_placeholders = list_placeholders(dest_calendar_name)
+    existing_placeholders = list_placeholders(dest_calendar_id)
     existing = {(p["startDate"], p["endDate"]) for p in existing_placeholders}
 
     stale = [{"startDate": s, "endDate": e} for (s, e) in existing - wanted]
     missing = wanted - existing
 
-    deleted = delete_events(dest_calendar_name, stale) if stale else 0
+    deleted = delete_events(dest_calendar_id, stale) if stale else 0
     for start_iso, end_iso in missing:
-        create_placeholder(dest_calendar_name, start_iso, end_iso)
+        create_placeholder(dest_calendar_id, start_iso, end_iso)
 
     return len(missing), deleted
 
@@ -137,18 +145,18 @@ def sync_direction(source_events, dest_calendar_name):
 def main():
     now = datetime.datetime.now(datetime.timezone.utc)
     print(f"[{now.isoformat()}] Reading events...")
-    outlook_events = get_events(OUTLOOK_CALENDAR_NAME)
-    google_events = get_events(GOOGLE_CALENDAR_NAME)
-    print(f"  {OUTLOOK_CALENDAR_NAME}: {len(outlook_events)} real event(s) in window")
-    print(f"  {GOOGLE_CALENDAR_NAME}:  {len(google_events)} real event(s) in window")
+    outlook_events = get_events(OUTLOOK_CALENDAR_ID)
+    google_events = get_events(GOOGLE_CALENDAR_ID)
+    print(f"  {OUTLOOK_CALENDAR_LABEL}: {len(outlook_events)} real event(s) in window")
+    print(f"  {GOOGLE_CALENDAR_LABEL}:  {len(google_events)} real event(s) in window")
 
     print("Syncing placeholders...")
-    created1, deleted1 = sync_direction(outlook_events, GOOGLE_CALENDAR_NAME)
-    created2, deleted2 = sync_direction(google_events, OUTLOOK_CALENDAR_NAME)
+    created1, deleted1 = sync_direction(outlook_events, GOOGLE_CALENDAR_ID)
+    created2, deleted2 = sync_direction(google_events, OUTLOOK_CALENDAR_ID)
 
     print(
-        f"Done. {GOOGLE_CALENDAR_NAME}: +{created1}/-{deleted1} placeholder(s). "
-        f"{OUTLOOK_CALENDAR_NAME}: +{created2}/-{deleted2} placeholder(s)."
+        f"Done. {GOOGLE_CALENDAR_LABEL}: +{created1}/-{deleted1} placeholder(s). "
+        f"{OUTLOOK_CALENDAR_LABEL}: +{created2}/-{deleted2} placeholder(s)."
     )
 
 

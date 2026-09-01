@@ -15,12 +15,18 @@ They should appear as calendars in Calendar.app's sidebar
 
 ## 2. Configure the script
 
+Run `osascript list_calendar_ids.applescript` — it prints every Calendar.app
+calendar's name, its stable internal id, and a couple of its upcoming event
+titles (helpful when two calendars share the same display name, e.g. an
+Exchange account whose local name keeps getting overwritten by the server's
+folder name — matching by name is not reliable, so this script matches by id
+instead).
+
 Open `calendar_sync.py` and edit the CONFIG block near the top:
 
-- `OUTLOOK_CALENDAR_NAME` — the exact name of your Outlook calendar as shown
-  in Calendar.app's sidebar.
-- `GOOGLE_CALENDAR_NAME` — the exact name of your Google calendar as shown
-  in Calendar.app's sidebar.
+- `OUTLOOK_CALENDAR_ID` — the id of your Outlook calendar from the command above.
+- `GOOGLE_CALENDAR_ID` — the id of your Google calendar from the command above.
+- `OUTLOOK_CALENDAR_LABEL` / `GOOGLE_CALENDAR_LABEL` — display names used only in log output.
 - `SYNC_WINDOW_DAYS` — how far ahead to keep synced (default 14).
 
 ## 3. Run it once by hand

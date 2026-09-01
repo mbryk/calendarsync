@@ -1,5 +1,5 @@
-// Usage: osascript -l JavaScript read_events.js "<CalendarName>" "<PlaceholderPrefix>" <daysAhead>
-// Usage: osascript -l JavaScript read_events.js "NJIA Calendar" "\U0001F512 Busy" 30
+// Usage: osascript -l JavaScript read_events.js "<CalendarId>" "<PlaceholderPrefix>" <daysAhead>
+// Usage: osascript -l JavaScript read_events.js "3F5D9A23-9D3A-42F2-95B3-7AC25596D995" "\U0001F512 Busy" 30
 // Prints JSON array of { summary, startDate, endDate, allDay } for real (non-placeholder)
 // events in the window, expanding recurring events into their individual occurrences.
 
@@ -7,15 +7,14 @@ var DAY_MAP = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
 
 function run(argv) {
   var app = Application('Calendar');
-  var calName = argv[0];
+  var calId = argv[0];
   var prefix = argv[1];
   var daysAhead = parseInt(argv[2]) || 14;
 
-  var cals = app.calendars.whose({ name: calName });
-  if (cals.length === 0) {
-    return JSON.stringify({ error: "Calendar not found: " + calName });
+  var cal = app.calendars.byId(calId);
+  if (!cal.name()) {
+    return JSON.stringify({ error: "Calendar not found: " + calId });
   }
-  var cal = cals[0];
 
   var now = new Date();
   var future = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
@@ -23,26 +22,48 @@ function run(argv) {
   // whose({startDate: ...}) unreliably drops recurring masters whose series
   // start is in the past (backend-dependent — seen it silently exclude some
   // recurring events but not others), so fetch everything and filter in JS.
-  var events = cal.events();
+  //
+  // Fetching one property at a time per-event is extremely slow over the
+  // Calendar.app scripting bridge (~800ms/event/property). Bulk-fetching
+  // each property across the whole collection in one Apple Event round trip
+  // is ~60x cheaper per event, so we do that instead of materializing
+  // individual event references and looping.
+  var evSpec = cal.events;
+  var summaries = evSpec.summary();
+  var starts = evSpec.startDate();
+  var ends = evSpec.endDate();
+  var allDays = evSpec.alldayEvent();
+  var recurrences = evSpec.recurrence();
+  var excludedDatesLists = evSpec.excludedDates();
+  var uids = evSpec.uid();
+  var sequences = evSpec.sequence();
+
+  // Exchange leaves stale duplicate copies of a series behind (same uid)
+  // after a "this and future occurrences" reschedule, at the old time slot,
+  // still recurring indefinitely. The live copy is the one with the highest
+  // iCalendar SEQUENCE number (stale phantom copies are stuck at 0), so keep
+  // only that index per uid.
+  var bestIndexForUid = {};
+  for (var i = 0; i < uids.length; i++) {
+    var uid = uids[i];
+    if (!(uid in bestIndexForUid) || sequences[i] > sequences[bestIndexForUid[uid]]) {
+      bestIndexForUid[uid] = i;
+    }
+  }
 
   var result = [];
-  var seen = {}; // some backends (e.g. Exchange) hand back the same
-                 // recurring event as multiple raw entries from whose(),
-                 // so dedupe by (summary, start, end) before returning.
-  for (var i = 0; i < events.length; i++) {
-    var e = events[i];
-    var summary, start, end, allDay, recurrence, excludedDates;
-    try {
-      summary = e.summary() || "";
-      start = e.startDate();
-      end = e.endDate();
-      allDay = e.alldayEvent();
-      recurrence = e.recurrence();
-      excludedDates = e.excludedDates() || [];
-    } catch (err) {
-      continue;
-    }
+  var seen = {}; // safety net for exact (summary, start, end) duplicates
+  for (var i = 0; i < summaries.length; i++) {
+    if (bestIndexForUid[uids[i]] !== i) continue; // stale duplicate of another entry's uid
+
+    var summary = summaries[i] || "";
+    var start = starts[i];
+    var end = ends[i];
+    var allDay = allDays[i];
+    var recurrence = recurrences[i];
+    var excludedDates = excludedDatesLists[i] || [];
     if (summary.indexOf(prefix) === 0) continue; // skip our own placeholders
+    if (summary.indexOf("Canceled:") === 0) continue; // Exchange keeps cancelled meetings as separate events instead of removing them
 
     if (!recurrence) {
       if (start < now || start > future) continue;
@@ -57,12 +78,6 @@ function run(argv) {
     }
 
     var occurrences = expandRecurrence(recurrence, start, now, future);
-    if (summary === 'ResX Monthly Meeting') {
-      console.log(JSON.stringify(occurrences));
-      console.log(JSON.stringify({
-        recurrence, start, now, future
-      }));
-    }
     for (var j = 0; j < occurrences.length; j++) {
       var occStart = occurrences[j];
       if (excludedKeys[occStart.toISOString()]) continue;

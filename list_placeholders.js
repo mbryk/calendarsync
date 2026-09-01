@@ -1,17 +1,16 @@
-// Usage: osascript -l JavaScript list_placeholders.js "<CalendarName>" "<PlaceholderPrefix>"
+// Usage: osascript -l JavaScript list_placeholders.js "<CalendarId>" "<PlaceholderPrefix>"
 // Prints JSON array of { startDate, endDate } for placeholder events (any time,
 // not just within the sync window) previously created by this script.
 
 function run(argv) {
   var app = Application('Calendar');
-  var calName = argv[0];
+  var calId = argv[0];
   var prefix = argv[1];
 
-  var cals = app.calendars.whose({ name: calName });
-  if (cals.length === 0) {
-    return JSON.stringify({ error: "Calendar not found: " + calName });
+  var cal = app.calendars.byId(calId);
+  if (!cal.name()) {
+    return JSON.stringify({ error: "Calendar not found: " + calId });
   }
-  var cal = cals[0];
 
   var events = cal.events.whose({ summary: { _beginsWith: prefix } })();
 
