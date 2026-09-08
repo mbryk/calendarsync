@@ -63,7 +63,7 @@ function run(argv) {
     var recurrence = recurrences[i];
     var excludedDates = excludedDatesLists[i] || [];
     if (summary.indexOf(prefix) === 0) continue; // skip our own placeholders
-    if (summary.indexOf("Canceled:") === 0) continue; // Exchange keeps cancelled meetings as separate events instead of removing them
+    if ((summary.indexOf("Canceled:") === 0) || (summary.indexOf("CANCELED:") === 0)) continue;
 
     if (!recurrence) {
       if (start < now || start > future) continue;
