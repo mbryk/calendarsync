@@ -1,0 +1,4 @@
+logs/
+sync.log
+__pycache__/
+.sf/
