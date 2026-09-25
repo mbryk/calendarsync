@@ -8,10 +8,12 @@
 // attendee matching that email, e.g. "accepted"/"declined"/"tentative"/"unknown", or
 // null if no attendee matches — e.g. an event with no attendees at all).
 // NOTE: for any uid shared by more than one calendar object, a "UIDGROUP ..." line is
-// printed per index (raw sequence/stampDate/recurrence dump), and a "SUPPRESSED ..."
-// line is printed per dropped occurrence from a non-primary same-uid index (see
-// run()'s same-uid handling below for why only one index per uid survives). Both go
-// via console.log BEFORE the JSON result. console.log output always lands ahead of
+// printed per index (raw sequence/stampDate/recurrence dump), a "SUPPRESSED ..." line
+// is printed per dropped occurrence from a non-primary same-uid index, and a
+// "DUALWINNER ..." line is printed once per uid group where a recurring-master winner
+// and a single-occurrence-override winner both survive together (see run()'s same-uid
+// handling below — up to two indices per uid can survive now, not just one). All three
+// go via console.log BEFORE the JSON result. console.log output always lands ahead of
 // the function's own return value in osascript's stdout, so a caller must parse only
 // the LAST line of stdout as JSON, not assume stdout is JSON-only.
 
@@ -60,59 +62,89 @@ function run(argv) {
 
   // Exchange can leave multiple event objects behind under the same uid:
   // stale duplicate series copies after a "this and future occurrences"
-  // split, or leftover copies from past edits of a recurring series (see
-  // docs/ai/jxa-calendar-quirks.md). Confirmed 2026-09-25 against real
-  // clusters the user flagged as wrong on their calendar: the highest-
-  // `sequence` index per uid is usually the live copy, and EVERY other
-  // same-uid index is stale noise that should be dropped outright — this
-  // holds even when a non-primary index has a different `summary` (e.g. an
-  // "FW:" copy).
+  // split, leftover copies from past edits of a recurring series, or a
+  // detached single-occurrence override that still carries a stale copy of
+  // the master's `recurrence` field (see docs/ai/jxa-calendar-quirks.md and
+  // isSingleOccurrenceOverride below).
   //
-  // Exception: a single-occurrence override (see `isSingleOccurrenceOverride`
-  // below) can have a *lower* `sequence` than the recurring-master sibling
-  // it's replacing, because it's its own object with its own short edit
-  // history, not a continuation of the master's count — confirmed live for
-  // the `Digital RFI Grooming` and `Lizzy <> Mark` reschedules (see
-  // docs/ai/jxa-calendar-quirks.md). So within a uid group, if any index is a
-  // single-occurrence override, the primary is chosen by max-sequence among
-  // just that subset (ignoring recurring-master siblings' sequence
-  // entirely); only when no single-occurrence override exists in the group
-  // do we fall back to max-sequence across the whole group.
+  // A uid group is partitioned by isSingleOccurrenceOverride into two
+  // disjoint subsets, and EACH subset gets its own max-sequence winner,
+  // independently:
+  //   - recurringIndices: ordinary recurring-master copies, including stale
+  //     ones left behind by past edits. Max-seq among just these picks the
+  //     one live copy — confirmed reliable against real clusters the user
+  //     flagged as wrong (2026-09-25); this holds even when a non-winning
+  //     index has a different `summary` (e.g. an "FW:" copy).
+  //   - singleOccIndices: detached single-occurrence overrides. Max-seq
+  //     among just these picks the one live override, if more than one
+  //     exists (a tiebreak only — not yet seen live with >1).
+  // BOTH winners are expanded and emitted when both subsets are non-empty.
+  // This is a deliberate approximation, not the fully correct fix: a
+  // single-occurrence override conceptually REPLACES one specific occurrence
+  // of the recurring master (RFC 5545 RECURRENCE-ID), but JXA exposes
+  // nothing like RECURRENCE-ID here, and the master's own excludedDates() is
+  // confirmed unreliable for exactly this case (see
+  // docs/ai/jxa-calendar-quirks.md), so there's no reliable way to know
+  // *which* master occurrence a given override replaces and exclude just
+  // that one. Emitting both winners unconditionally is correct whenever the
+  // override's own date is already in the past (expandIndexOccurrences'
+  // window check then makes it contribute nothing) but could in principle
+  // produce an extra phantom placeholder for a still-future override's
+  // original slot, alongside the corrected one — logDualWinner below prints
+  // both winners' full occurrence lists so that case is visible in the log
+  // if/when it actually happens, instead of only being caught by chance.
   //
-  // This is a real assumption, not a certainty — if it's ever wrong (some
-  // future same-uid cluster where the suppressed index was actually the
-  // right one), `logUidGroup`/`logSuppressed` below print enough raw detail
-  // per dropped occurrence (seq, stamp, summary, actual expanded time) to
-  // manually audit against the calendar and catch it.
+  // An earlier revision of this same logic (same day, 2026-09-25) had ONE
+  // winner for the whole uid group: if ANY single-occurrence override
+  // existed, it became the sole primary and every recurring-master sibling
+  // was suppressed outright, regardless of sequence. Confirmed live to
+  // silently drop an entire ongoing weekly series (`Digital RFI Grooming`,
+  // `Digital RFI Pilot Project Check-In Meetings`) whenever a past one-off
+  // reschedule happened to share their uid — the override (already in the
+  // past) became primary and contributed zero occurrences, while the real
+  // ongoing series got suppressed as "non-primary". Don't reintroduce that
+  // shape (a single `bestIndexForUid` per uid, with the override subset
+  // taking an all-or-nothing precedence over the recurring subset).
   var indicesByUid = {};
   for (var i = 0; i < uids.length; i++) {
     var uid = uids[i];
     (indicesByUid[uid] = indicesByUid[uid] || []).push(i);
   }
 
-  var bestIndexForUid = {};
-  var bestReasonForUid = {};
+  var primariesForUid = {};
+  var reasonForIndex = {};
   for (var uidKey in indicesByUid) {
     var uidGroup = indicesByUid[uidKey];
     var singleOccIndices = [];
+    var recurringIndices = [];
     for (var gi = 0; gi < uidGroup.length; gi++) {
       if (isSingleOccurrenceOverride(uidGroup[gi])) singleOccIndices.push(uidGroup[gi]);
+      else recurringIndices.push(uidGroup[gi]);
     }
-    var candidates = singleOccIndices.length > 0 ? singleOccIndices : uidGroup;
-    var best = candidates[0];
-    for (var ci = 1; ci < candidates.length; ci++) {
-      if (sequences[candidates[ci]] > sequences[best]) best = candidates[ci];
+
+    var winners = [];
+    if (recurringIndices.length > 0) {
+      var recurringWinner = pickMaxSeq(recurringIndices);
+      reasonForIndex[recurringWinner] = "recurring-master winner, max-seq among " +
+        recurringIndices.length + " recurring-master sibling(s)" +
+        (singleOccIndices.length > 0
+          ? "; group also has " + singleOccIndices.length + " single-occurrence override(s), emitted separately"
+          : "");
+      winners.push(recurringWinner);
     }
-    bestIndexForUid[uidKey] = best;
-    // Recorded per uid (not just for the primary) so logUidGroup can explain
-    // the pick even when the group has only one candidate in the winning
-    // subset — makes it possible to tell, after the fact from the log alone,
-    // whether the single-occurrence-override guard fired for this group and,
-    // if it fired with >1 single-occurrence sibling, that the tiebreak among
-    // them was still plain max-sequence (see run()'s comment above).
-    bestReasonForUid[uidKey] = singleOccIndices.length > 0
-      ? "single-occurrence override, max-seq among " + singleOccIndices.length + " such sibling(s)"
-      : "no single-occurrence siblings in group, max-seq across whole group";
+    if (singleOccIndices.length > 0) {
+      var singleOccWinner = pickMaxSeq(singleOccIndices);
+      reasonForIndex[singleOccWinner] = "single-occurrence-override winner, max-seq among " +
+        singleOccIndices.length + " such sibling(s)" +
+        (recurringIndices.length > 0
+          ? "; group also has a recurring-master winner, emitted separately"
+          : "");
+      winners.push(singleOccWinner);
+    }
+    // Push order is always [recurringWinner, singleOccWinner] when both
+    // exist (recurring is always pushed first above) — logDualWinner below
+    // relies on that order.
+    primariesForUid[uidKey] = winners;
   }
 
   var result = [];
@@ -120,20 +152,31 @@ function run(argv) {
 
   for (var uid2 in indicesByUid) {
     var group = indicesByUid[uid2];
-    var primaryIdx = bestIndexForUid[uid2];
-    if (group.length > 1) logUidGroup(uid2, group, primaryIdx, bestReasonForUid[uid2]);
+    var primaries = primariesForUid[uid2];
+    if (group.length > 1) logUidGroup(uid2, group, primaries, reasonForIndex);
 
-    var primaryOccs = expandIndexOccurrences(primaryIdx);
-    for (var p = 0; p < primaryOccs.length; p++) {
-      pushUnique(result, seen, primaryOccs[p]);
+    var primarySet = {};
+    var occsByPrimary = {};
+    for (var pi = 0; pi < primaries.length; pi++) {
+      var pIdx = primaries[pi];
+      primarySet[pIdx] = true;
+      var occs = expandIndexOccurrences(pIdx);
+      occsByPrimary[pIdx] = occs;
+      for (var p = 0; p < occs.length; p++) {
+        pushUnique(result, seen, occs[p]);
+      }
+    }
+
+    if (primaries.length === 2) {
+      logDualWinner(uid2, primaries[0], occsByPrimary[primaries[0]], primaries[1], occsByPrimary[primaries[1]]);
     }
 
     for (var g = 0; g < group.length; g++) {
       var idx = group[g];
-      if (idx === primaryIdx) continue;
+      if (primarySet[idx]) continue;
       var secOccs = expandIndexOccurrences(idx);
       for (var s = 0; s < secOccs.length; s++) {
-        logSuppressed(uid2, primaryIdx, idx, secOccs[s]);
+        logSuppressed(uid2, primaries, idx, secOccs[s]);
       }
     }
   }
@@ -165,6 +208,17 @@ function isSingleOccurrenceOverride(idx) {
   if (rule.FREQ !== 'WEEKLY' || !rule.BYDAY) return false;
   var byDay = rule.BYDAY.split(',').map(function (d) { return DAY_MAP[d]; });
   return byDay.indexOf(starts[idx].getDay()) === -1;
+}
+
+// Picks the index with the highest `sequence` from a non-empty list —
+// shared tiebreak used independently for each of run()'s two winner
+// subsets (recurring-master and single-occurrence-override).
+function pickMaxSeq(indices) {
+  var best = indices[0];
+  for (var i = 1; i < indices.length; i++) {
+    if (sequences[indices[i]] > sequences[best]) best = indices[i];
+  }
+  return best;
 }
 
 // Filters + expands one bulk-fetched index into candidate occurrence
@@ -215,17 +269,19 @@ function pushUnique(result, seen, occ) {
 // lets a same-uid cluster be audited from the raw Calendar.app data alone
 // (sequence/stampDate/recurrence/summary/start/end per index), independent
 // of whatever the primary-selection heuristic below decides to do with it.
-// `reason` explains why `primaryIdx` won (see run()'s bestReasonForUid) —
-// printed on the primary's own line so a group with only one candidate in
-// the winning subset still records why, and so it's possible to tell after
-// the fact whether the single-occurrence-override guard fired for this
-// group at all.
-function logUidGroup(uid, group, primaryIdx, reason) {
+// `primaries` is the array of 0-2 winner indices from run() (recurring-
+// master winner and/or single-occurrence-override winner); `reasonForIndex`
+// maps each winner index to why it won (see run()'s comment). Printed on
+// each winner's own line so it's possible to tell after the fact, from the
+// log alone, which subset(s) had a winner and why.
+function logUidGroup(uid, group, primaries, reasonForIndex) {
+  var primarySet = {};
+  for (var pi = 0; pi < primaries.length; pi++) primarySet[primaries[pi]] = true;
   for (var i = 0; i < group.length; i++) {
     var idx = group[i];
     console.log(
       "UIDGROUP uid=" + uid + " idx=" + idx +
-      (idx === primaryIdx ? " (primary: " + reason + ")" : "") +
+      (primarySet[idx] ? " (primary: " + reasonForIndex[idx] + ")" : "") +
       " seq=" + sequences[idx] + " stamp=" + stampDates[idx] +
       " recurrence=" + (recurrences[idx] ? JSON.stringify(recurrences[idx]) : "null") +
       " start=" + starts[idx].toISOString() + " end=" + ends[idx].toISOString() +
@@ -236,16 +292,45 @@ function logUidGroup(uid, group, primaryIdx, reason) {
 
 // Prints one line per occurrence dropped from a non-primary same-uid index
 // (see run()'s same-uid handling) — the actual expanded time that occurrence
-// would have landed on, next to the primary's identity. This is the audit
-// trail for the "highest sequence always wins" assumption: if a suppressed
+// would have landed on, next to the identity of every surviving winner
+// (`primaries`, 1 or 2 indices). This is the audit trail for the "highest
+// sequence always wins (within a subset)" assumption: if a suppressed
 // occurrence ever turns out to be the one that should've synced, this line
 // has the uid/idx/seq/stamp/summary/time needed to catch it after the fact.
-function logSuppressed(uid, primaryIdx, secondaryIdx, occ) {
+function logSuppressed(uid, primaries, secondaryIdx, occ) {
+  var keptDesc = primaries.map(function (idx) {
+    return "idx=" + idx + " seq=" + sequences[idx] + " stamp=" + stampDates[idx];
+  }).join(" & ");
   console.log(
     "SUPPRESSED uid=" + uid +
-    " | kept primary idx=" + primaryIdx + " seq=" + sequences[primaryIdx] + " stamp=" + stampDates[primaryIdx] +
+    " | kept primary " + keptDesc +
     " || dropped idx=" + secondaryIdx + " seq=" + sequences[secondaryIdx] + " stamp=" + stampDates[secondaryIdx] +
     " time=" + occ.startISO + "-" + occ.endISO + " summary=" + JSON.stringify(occ.summary)
+  );
+}
+
+// Printed once per uid group where BOTH a recurring-master winner and a
+// single-occurrence-override winner survive together — the "emit both"
+// approximation described in run()'s comment above. Lists every occurrence
+// date each winner actually produced, side by side, so a human (or a future
+// pass) can check whether the recurring-master winner ever produced an
+// occurrence suspiciously close to the override's own date — that would be
+// the "phantom original slot" duplicate this approximation risks for a
+// still-future override (an already-past override, as seen so far, always
+// produces zero occurrences here, so this line is expected to show an empty
+// list on the override side in every case observed to date — a non-empty
+// override-side list paired with a nearby recurring-side date is the signal
+// to go build the real RECURRENCE-ID-less exclusion heuristic).
+function logDualWinner(uid, recurringIdx, recurringOccs, singleOccIdx, singleOccOccs) {
+  var fmt = function (occs) {
+    var dates = [];
+    for (var i = 0; i < occs.length; i++) dates.push(occs[i].startISO);
+    return dates.length ? dates.join(", ") : "(none)";
+  };
+  console.log(
+    "DUALWINNER uid=" + uid +
+    " | recurring-master idx=" + recurringIdx + " occurrences=[" + fmt(recurringOccs) + "]" +
+    " || single-occurrence-override idx=" + singleOccIdx + " occurrences=[" + fmt(singleOccOccs) + "]"
   );
 }
 

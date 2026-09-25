@@ -68,7 +68,7 @@ OUTLOOK_OWNER_EMAIL = "Mark.Bryk@Innovation.nj.gov"
 GOOGLE_OWNER_EMAIL = ""
 
 # How many days ahead (from "now") to keep synced.
-SYNC_WINDOW_DAYS = 21
+SYNC_WINDOW_DAYS = 14
 
 # Whether all-day events (e.g. "Out of office", holidays) should be synced as
 # placeholders on the other calendar. Off by default since these tend to be
