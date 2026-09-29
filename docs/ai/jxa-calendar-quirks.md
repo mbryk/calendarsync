@@ -154,3 +154,22 @@ These cost real time to discover and aren't documented anywhere Apple publishes.
   `run_jxa()` was only reading `result.stdout` and silently dropping every diagnostic line for
   this reason until fixed. Any future JXA script that wants diagnostic output visible to a Python
   (or other subprocess) caller must have that caller read `result.stderr`, not `result.stdout`.
+- **`osascript` kills the process (SIGKILL) if a single command-line argument is longer than
+  ~995 characters — well below macOS's own `ARG_MAX` (~1MB) and unrelated to Calendar.app.**
+  Confirmed empirically (2026-09-29) via `delete_events.js`, which used to receive a whole
+  JSON-encoded array of `{startDate, endDate}` as one argv string: a 984-char payload (12 items)
+  succeeded; a 1066-char payload (13 items) got SIGKILLed (`exit=137`), reproducing identically
+  whether the command was pasted into an interactive shell or run from a script file — ruling out
+  a TTY/paste-length artifact. Hitting real `ARG_MAX` instead fails at `execve`/`subprocess.run()`
+  itself (`OSError: Argument list too long`) and never produces a completed process to SIGKILL, so
+  don't mistake a fast silent `exit=-9`/`exit=137` with empty stderr for that — it's this much
+  smaller per-argument limit. Fix: never pass a variable-length bulk payload (JSON array, long
+  string, etc.) as a raw argv value. Write it to a temp file and pass the file *path* as the argv
+  instead; read it back in the JXA script via the ObjC/Foundation bridge:
+  `ObjC.import('Foundation'); $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null).js`
+  (note: JXA's ObjC method-name mapping removes the selector's colons and camel-cases what
+  follows — `stringWithContentsOfFile:encoding:error:` becomes
+  `stringWithContentsOfFileEncodingError`, not `stringWithContentsOfFile_encoding_error`).
+  `delete_events.js`/`calendar_sync.py`'s `delete_events()` use this pattern now — any new script
+  taking a bulk/variable-length payload should follow it too rather than reintroducing a raw argv
+  string.

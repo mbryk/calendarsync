@@ -43,6 +43,7 @@ import json
 import logging
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -192,10 +193,19 @@ def list_placeholders(calendar_id, label):
 
 
 def delete_events(calendar_id, events, label):
-    data = run_jxa(
-        "delete_events.js",
-        [calendar_id, PLACEHOLDER_PREFIX, json.dumps(events)],
-    )
+    # osascript has a hard ~995-char limit per command-line argument, which a
+    # JSON-encoded events list can exceed well before macOS's own ARG_MAX —
+    # so the payload goes through a temp file instead of argv.
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(events, f)
+        payload_path = f.name
+    try:
+        data = run_jxa(
+            "delete_events.js",
+            [calendar_id, PLACEHOLDER_PREFIX, payload_path],
+        )
+    finally:
+        Path(payload_path).unlink()
     if isinstance(data, dict) and "error" in data:
         raise RuntimeError(data["error"])
     deleted = data.get("deleted", 0)

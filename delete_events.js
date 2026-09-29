@@ -1,12 +1,22 @@
-// Usage: osascript -l JavaScript delete_events.js "<CalendarId>" "<PlaceholderPrefix>" '<JSON array of {startDate, endDate}>'
+// Usage: osascript -l JavaScript delete_events.js "<CalendarId>" "<PlaceholderPrefix>" "<path to JSON file containing array of {startDate, endDate}>"
 // Deletes only the placeholder events (matched by prefix AND exact start/end)
-// listed in the JSON argument. Prints JSON { deleted: <count> }.
+// listed in the JSON file. Prints JSON { deleted: <count> }.
+//
+// The list is passed via a file path, not inline JSON, because osascript
+// truncates/kills the process on command-line arguments over ~995 chars —
+// far below macOS's own ARG_MAX — which a JSON-encoded events list can
+// easily exceed.
 
 function run(argv) {
+  ObjC.import('Foundation');
   var app = Application('Calendar');
   var calId = argv[0];
   var prefix = argv[1];
-  var toDelete = JSON.parse(argv[2] || "[]");
+  var jsonPath = argv[2];
+  var jsonText = jsonPath
+    ? $.NSString.stringWithContentsOfFileEncodingError(jsonPath, $.NSUTF8StringEncoding, null).js
+    : "[]";
+  var toDelete = JSON.parse(jsonText);
 
   var cal = app.calendars.byId(calId);
   if (!cal.name()) {
