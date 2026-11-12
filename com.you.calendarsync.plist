@@ -5,9 +5,11 @@
     <key>Label</key>
     <string>com.you.calendarsync</string>
 
+    <!-- Must be the virtualenv's python, not /usr/bin/python3 — the EventKit
+         bindings are installed in .venv, not system-wide. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/Users/YOURNAME/calendar-sync/.venv/bin/python</string>
         <string>/Users/YOURNAME/calendar-sync/calendar_sync.py</string>
     </array>
 

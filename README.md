@@ -13,14 +13,30 @@ They should appear as calendars in Calendar.app's sidebar
 
 ![calendar sidebar](https://raw.githubusercontent.com/mbryk/calendarsync/refs/heads/main/images/calendar-sidebar.png)
 
-## 2. Configure the script
+## 2. Install the dependencies
 
-Run `osascript list_calendar_ids.applescript` — it prints every Calendar.app
-calendar's name, its stable internal id, and a couple of its upcoming event
-titles (helpful when two calendars share the same display name, e.g. an
-Exchange account whose local name keeps getting overwritten by the server's
-folder name — matching by name is not reliable, so this script matches by id
-instead).
+Reading your calendars uses macOS's EventKit framework, which needs one Python
+package. Install it into a virtualenv in this folder:
+
+```bash
+cd calendarsync
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Use the virtualenv rather than `pip install --user`: both Homebrew's and
+Apple's Python are marked as externally managed, and may refuse to install
+into themselves. Everything from here on runs as `.venv/bin/python`, not
+`python3`.
+
+## 3. Configure the script
+
+Run `.venv/bin/python eventkit_calendar.py` — it prints every Calendar.app
+calendar's name, which account it comes from, and its stable internal id.
+Two calendars can easily share a display name (an Exchange account's local
+name keeps getting overwritten by the server's folder name, so your work
+calendar is often just called "Calendar"), which is why this tool matches
+calendars by id rather than by name.
 
 Open `calendar_sync.py` and edit the CONFIG block near the top:
 
@@ -28,17 +44,36 @@ Open `calendar_sync.py` and edit the CONFIG block near the top:
 - `GOOGLE_CALENDAR_ID` — the id of your Google calendar from the command above.
 - `OUTLOOK_CALENDAR_LABEL` / `GOOGLE_CALENDAR_LABEL` — display names used only in log output.
 - `SYNC_WINDOW_DAYS` — how far ahead to keep synced (default 14).
+- `OUTLOOK_OWNER_EMAIL` / `GOOGLE_OWNER_EMAIL` — your own address as it appears
+  in each calendar's attendee lists, used to look up your RSVP status. Leave
+  either as `""` to skip the lookup on that calendar. Case doesn't matter.
+- `INCLUDE_DECLINED_EVENTS` / `INCLUDE_TENTATIVE_EVENTS` — whether meetings you
+  declined (default: no) or marked tentative (default: yes) still block time on
+  the other calendar. Needs the owner email above; see the caveat under
+  "Notes / gotchas".
 
-## 3. Run it once by hand
+## 4. Run it once by hand
 
 ```bash
 cd calendarsync
-python3 calendar_sync.py
+.venv/bin/python calendar_sync.py
 ```
 
-The first run will trigger a macOS permission prompt asking to let
-Terminal/Python control Calendar.app — approve it (or check System Settings >
-Privacy & Security > Automation if you miss the dialog).
+The first run triggers one macOS permission prompt, **Calendars** ("Python
+would like to access your calendars"). Approve it, and make sure you grant
+*full* access — macOS also offers an "add events only" option, which is not
+enough to read your events and fails with no error message at all. If you miss
+the dialog, check System Settings > Privacy & Security > Calendars.
+
+Run it by hand from Terminal the first time, not from launchd: macOS shows the
+prompt to whatever launched the process, so a prompt raised under launchd may
+never appear on screen.
+
+To see what it *would* do without touching either calendar:
+
+```bash
+.venv/bin/python calendar_sync.py --dry-run
+```
 
 Check both calendars — you should see "🔒 Busy" placeholders appear for each
 real event on the other side. Run it a second time and confirm it doesn't
@@ -46,11 +81,12 @@ duplicate them — it diffs by time against existing placeholders, so
 unchanged events are left untouched and only moved/cancelled/new ones cause
 a create or delete.
 
-## 4. Automate it with launchd
+## 5. Automate it with launchd
 
 1. Edit `com.you.calendarsync.plist`:
    - Replace `/Users/YOURNAME/calendar-sync/...` with the actual path to
-     wherever you put this folder.
+     wherever you put this folder — in **both** the `.venv/bin/python` path
+     and the `calendar_sync.py` path.
    - Adjust `StartInterval` (in seconds) if you want a different frequency
      — 10800 = every 3 hours. For once a day, use 86400, or switch to
      `StartCalendarInterval` for a fixed time (e.g. 7am) — see `man launchd.plist`.
@@ -68,17 +104,21 @@ launchctl unload ~/Library/LaunchAgents/com.you.calendarsync.plist
 
 ## Notes / gotchas
 
-- **Calendar.app scripting can be slow** on calendars with a huge amount of
-  history — the read script only looks forward from "now", which keeps it
-  reasonably fast, but very large calendars may still take a few seconds.
 - **Google sync lag**: since Calendar.app syncs Google via Apple's own CalDAV
   refresh cycle (not a live API call), a newly created event on either side
   may take a few minutes to show up before this script can see it. Fine for
   a "block time on my calendar" use case.
-- **All-day events**: currently included and mirrored as all-day placeholders
-  where the source is all-day. If that's too aggressive (e.g. you don't want
-  a single "OOO" day blocking your whole calendar), you can filter those out
-  in `read_events.js`.
+- **All-day events** (e.g. "Out of office", holidays) are skipped by default,
+  since they tend to be informational rather than real time blocks. Set
+  `INCLUDE_ALL_DAY_EVENTS = True` in the CONFIG block to mirror them too.
+- **Declined/tentative filtering is best-effort, not a guarantee.** With
+  `INCLUDE_DECLINED_EVENTS = False`, a meeting you declined is skipped *only if*
+  the calendar actually reports your RSVP as "declined". On an Exchange calendar
+  most events instead report a status that isn't an RSVP answer at all, which
+  the script treats as unknown and keeps rather than risk hiding a real
+  commitment. So some declined meetings will still get a placeholder. The filters
+  also do nothing on a calendar whose `*_OWNER_EMAIL` is left blank, since your
+  status there can't be looked up at all.
 - **Deleting the script's placeholders manually is safe** — the next run
   just recreates whatever's still needed (it diffs against real events, so
   nothing gets silently skipped).

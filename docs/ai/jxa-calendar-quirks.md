@@ -1,9 +1,91 @@
-# JXA / Calendar.app scripting quirks
+# Calendar.app quirks (EventKit and AppleScript/JXA)
 
-Reference doc, not orientation — only read this if you're about to write or debug a new
-`.js` or `.applescript` file that drives `Calendar.app`. Linked from `docs/ai/README.md`.
+Reference doc, not orientation — only read this if you're about to write or debug code that
+touches `Calendar.app`. Linked from `docs/ai/README.md`. These cost real time to discover and
+aren't documented anywhere Apple publishes.
 
-These cost real time to discover and aren't documented anywhere Apple publishes.
+Two sections. **EventKit** is the live code path — read that part. **AppleScript / JXA** is kept
+for the case where someone reintroduces `osascript` here (an operator script, a property EventKit
+doesn't expose); it describes landmines in an interface this project no longer uses, and several
+bullets name `.js` files that no longer exist.
+
+## EventKit (the live code path)
+
+- **`predicateForEventsWithStartDate:endDate:` silently returns FEWER results the wider the range
+  gets, and eventually none.** There is no error, no warning, and no documented limit. Measured
+  2026-11-12 on one live calendar, total events returned by span: `1y=134`, `2y=421`, `3y=581`,
+  `4y=633`, `6y=560`, `8y=482`, `10y=143`, `12y=0` — it peaks around a 4-year span and decays
+  from there. Worse for this project's purposes, the *placeholder* count specifically went from
+  24 to 0 once the span passed ~8 years. So a "just query everything" range is not merely slow,
+  it quietly returns wrong answers. Keep any single predicate well under ~3 years of span
+  (`MAX_PREDICATE_SPAN_DAYS` in `eventkit_calendar.py` enforces this and raises rather than
+  returning a truncated result); if a genuinely wide range is ever needed, split it into chunks
+  and union the results.
+- **`EKEventStore` returning one calendar named `"Calendar"` with the id
+  `"VIRTUAL_APP_CALENDAR_UUID"` means the process has WRITE-ONLY calendar access, not that it
+  needs to be an entitled app bundle.** macOS 14 split calendar permission into write-only and
+  full access; a write-only process is handed a single fictional calendar to add events to and is
+  never shown the real ones. There is no error and no permission prompt, so it reads as an
+  entitlement wall when it is really just the wrong request.
+  `authorizationStatusForEntityType_(0)` returns `4` (writeOnly) in this state; calling
+  `requestFullAccessToEventsWithCompletion_` raises a normal TCC prompt and, once granted,
+  returns every real calendar. **Confirmed 2026-11-09 from a plain `python3` script (PyObjC,
+  `pyobjc-framework-EventKit`) — no app bundle, no code signing, and no Apple Developer account
+  is required to read real calendar data.** Once full access is granted, two of the returned
+  `calendarIdentifier`s match `calendar_sync.py`'s `OUTLOOK_CALENDAR_ID`/`GOOGLE_CALENDAR_ID`
+  exactly — EventKit and Calendar.app's scripting interface share one identifier namespace.
+- **EventKit returns resolved occurrences, which is why none of the same-`uid` mess in the
+  AppleScript section applies to it.** `eventsMatchingPredicate_` hands back the expanded,
+  already-deduplicated occurrence stream that Calendar.app's own UI draws — not the raw stored
+  objects the scripting interface exposes. It also exposes the fields JXA had no equivalent for:
+  `isDetached()` (this object is a single-occurrence override), `occurrenceDate()` (which
+  occurrence it replaces, i.e. `RECURRENCE-ID`), and `status()` for an explicit `canceled` flag
+  instead of matching `"Canceled:"` in titles. Measured 2026-11-09 over a live 14-day window: 43
+  occurrences, and the only `uid`s returning more than one occurrence were legitimate weekly
+  repeats — zero phantom clones, on the same calendar where bulk JXA fetch reports up to 19
+  objects under one `uid`.
+- **`EKParticipant.isCurrentUser()` is not trustworthy — match attendees by email instead.** On a
+  real Exchange event with 13 attendees it returned true for the *organizer*, not for this
+  machine's account owner. `eventkit_calendar.py`'s `owner_status()` matches
+  `OUTLOOK_OWNER_EMAIL`/`GOOGLE_OWNER_EMAIL` against `emailAddress()` (falling back to the
+  participant's `mailto:` URL, since `emailAddress` is absent on some macOS versions).
+  **Case-fold both sides of that comparison.** Exchange returns the owner's address capitalized
+  (`Mark.Bryk@Innovation.nj.gov`), so comparing it against a lowercased attendee address matches
+  nothing — and the failure is silent, because "no attendee matched" is also the legitimate
+  result for an event you created yourself, so every event simply reports no status.
+- **`EKParticipant.participantStatus()` frequently returns a task state rather than an RSVP
+  answer on Exchange events, and there is no flag distinguishing the two.** Alongside the
+  expected pending/accepted/declined/tentative (1-4) you get delegated/completed/in-process
+  (5/6/7) — a real Exchange event here reported `7` ("in process"), where Calendar.app's
+  scripting interface had said `"unknown"`. These are answers to a *task*, not to an invitation,
+  so `PARTICIPANT_STATUS` in `eventkit_calendar.py` collapses 5/6/7 (and 0) to `"unknown"`.
+  Measured over a live 14-day window: 21 of 26 Exchange events landed on `"unknown"` this way,
+  and only 2 reported a real `accepted`. Anything built on RSVP status therefore has to treat
+  "unknown" as the common case and degrade gracefully, not as a rare edge case — don't design a
+  feature that assumes a usable status is normally available on an Exchange calendar.
+- **`calendarItemExternalIdentifier` is the real iCalendar UID, which is NOT the same string
+  Calendar.app's scripting interface calls `uid`.** For a Google event it looks like
+  `1n48un6v8jnnieph3hids3rkhn@google.com`, where JXA reported a local UUID
+  (`9B125AF8-...`) for the same meeting. For a detached single-occurrence override it also
+  carries a `/RID=<epoch>` suffix identifying which occurrence it replaces. Don't try to
+  correlate the two forms across old and new log output.
+- **PyObjC turns Cocoa `error:` out-parameters into extra return values.** `saveEvent:span:commit:error:`,
+  `removeEvent:span:commit:error:` and `commit:` are called with `None` for the error argument and
+  return a `(ok, error)` tuple — a truthiness check on the single return value would always pass
+  and silently swallow every write failure.
+- **Use `EKSpanThisEvent` (0) for placeholder writes.** `EKSpanFutureEvents` (1) on a recurring
+  event deletes or rewrites the whole remaining series. Placeholders are never recurring, so
+  there is no case here where the wider span is correct.
+- **Install PyObjC into a virtualenv, not system python.** Both Homebrew's and Apple's Python are
+  marked `EXTERNALLY-MANAGED` (PEP 668), so `pip install --user pyobjc-framework-EventKit` is
+  refused outright. `python3 -m venv` works on both, which also makes it the more portable setup
+  instruction for a second machine.
+- **Nothing here needs macOS's Automation permission.** That permission governs one app driving
+  another via Apple Events (`osascript` → `Calendar.app`). EventKit talks to the calendar store
+  directly, so the Calendars (TCC) grant is the only one involved. Reintroducing a single
+  `osascript` call anywhere in the normal run would bring the second prompt back.
+
+## AppleScript / JXA (historical — only if `osascript` is reintroduced)
 
 - **`sdef` needs full Xcode, not just Command Line Tools.** `sdef /System/Applications/Calendar.app`
   errors out with "requires Xcode" on a CLT-only machine. There is no fast way to read Calendar.app's
@@ -28,14 +110,6 @@ These cost real time to discover and aren't documented anywhere Apple publishes.
 - **`app.calendars.byId(id)` never throws for an unknown id**, and `.exists()` is not a reliable
   check either (observed returning `true` for a made-up id). The only reliable "not found" signal
   found was `!cal.name()` returning falsy/empty — real calendars never have an empty name.
-- **EventKit via the AppleScript ⟷ Objective-C bridge (`use framework "EventKit"`) does not give
-  real calendar identifiers from a bare `osascript` process.** `EKEventStore`'s
-  `calendarIdentifier` comes back as the literal string `"VIRTUAL_APP_CALENDAR_UUID"` for every
-  calendar — this is macOS's privacy placeholder for a process that isn't an entitled, properly
-  `NSCalendarsUsageDescription`-declared app bundle. It looks like it's working (no error, no
-  permission prompt) but the data is fake. This approach is faster and cleaner *in general* (per
-  reports elsewhere), but not usable here — stick with driving `Calendar.app` itself via
-  `Application('Calendar')` (JXA) / `tell application "Calendar"` (AppleScript).
 - **Multiple raw entries sharing one `uid` is the general shape of Exchange's calendar-object
   weirdness**, not just a recurrence-specific glitch. The concrete case found: rescheduling a
   recurring series "this and future occurrences" in Outlook leaves an old, still-indefinitely-
