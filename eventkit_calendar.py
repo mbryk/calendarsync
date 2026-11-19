@@ -129,7 +129,8 @@ def iso_utc(nsdate):
 def to_nsdate(value):
     """datetime, or an ISO string as produced by iso_utc(), -> NSDate."""
     if isinstance(value, str):
-        value = datetime.datetime.fromisoformat(value)
+        # fromisoformat() only accepts iso_utc()'s trailing 'Z' on Python 3.11+.
+        value = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
     return NSDate.dateWithTimeIntervalSince1970_(value.timestamp())
 
 

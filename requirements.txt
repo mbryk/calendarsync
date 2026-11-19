@@ -1,10 +1,7 @@
-# Read side only (eventkit_reader.py). The writes still go through osascript,
-# which needs nothing installed.
-#
 # Install into a virtualenv, not system python:
 #   python3 -m venv .venv
 #   .venv/bin/pip install -r requirements.txt
 #
 # Homebrew and Apple's system pythons are both marked EXTERNALLY-MANAGED
 # (PEP 668), so `pip install --user` into them is refused.
-pyobjc-framework-EventKit>=13.0
+pyobjc-framework-EventKit>=10.0
